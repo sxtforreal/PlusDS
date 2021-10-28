@@ -1,0 +1,508 @@
+---
+title: "DS+"
+author: "Xiaotan Sun"
+date: "07/09/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+
+library(tidymodels)
+library(glmnet)
+library(readxl)
+library(tidyverse)
+library(dplyr)
+library(knitr)
+library(ggplot2)
+library(corrplot)
+library(caret)
+library(psych)
+library(GPArotation)
+library(limma)
+library(Biobase)
+library(survival)
+library(survminer)
+
+### Import data
+covariates <- read.csv(file = '/Users/sunxiaotan/Desktop/+DS/Data+ Project/dataset/Raw data.csv')
+outcomes <- read.csv(file = '/Users/sunxiaotan/Desktop/+DS/Data+ Project/dataset/shhs-cvd-summary-dataset-0.13.0.csv')
+int.var <- read_xlsx('/Users/sunxiaotan/Desktop/+DS/Data+ Project/Interested variables.xlsx')
+```
+
+## Initial modification
+```{r}
+### Modify outcome data
+outcomes <- outcomes[,c("nsrrid", "any_chd", "any_cvd", "censdate", "mi_date", "mip_date", "stk_date", "chd_dthdt","cvd_dthdt", "ang_date", "chf_date")]
+outcomes <- outcomes[complete.cases(outcomes$any_chd), ]
+
+# Create "date_to_event" which is the minimum value of all dates variables
+for(i in 1:nrow(outcomes)){
+  outcomes$date_to_event[i] <- min(outcomes$censdate[i], outcomes$mi_date[i], outcomes$mip_date[i], outcomes$stk_date[i], outcomes$chd_dthdt[i], outcomes$cvd_dthdt[i], outcomes$ang_date[i], outcomes$chf_date[i], na.rm = TRUE)
+}
+
+# Lowercase variable names
+names(covariates) <- tolower(names(covariates))
+
+# Check intersection
+intsec <- intersect(names(covariates), c(names(int.var),"nsrrid"))
+
+# Interested data set
+dat <- covariates[,c(intsec)]
+
+# Combine covariates and outcomes
+dat <- inner_join(dat, outcomes[,c("nsrrid", "any_chd", "any_cvd", "date_to_event")], by = 'nsrrid')
+
+# Partition
+oc <- dat[, 91:93]
+```
+
+## Data cleaning
+```{r}
+# Remove 'alphad1' because it contains 0 only
+dat <- dat[ ,-which(names(dat) %in% c("alphad1"))]
+
+# Create dummy variables for nominal categorical variables with more than 2 levels -- 'mstat', 'race'
+
+# Create dummy variables for 'mstat'
+# 'mstat' 1:married 2:widowed 3:divorced/seperated 4: never married
+dat$married[dat$mstat == 1] = 1
+dat$married[is.na(dat$married)] <- 0
+dat$widowed[dat$mstat == 2] = 1
+dat$widowed[is.na(dat$widowed)] <- 0
+dat$seperated[dat$mstat == 3] = 1
+dat$seperated[is.na(dat$seperated)] <- 0
+dat$never_married[dat$mstat == 4] = 1
+dat$never_married[is.na(dat$never_married)] <- 0
+
+# Create dummy variables for 'race'
+# 'race' 1:white 2:black 3:other 
+dat$white[dat$race == 1] = 1
+dat$white[is.na(dat$white)] <- 0
+dat$black[dat$race == 2] = 1
+dat$black[is.na(dat$black)] <- 0
+dat$other[dat$race == 3] = 1
+dat$other[is.na(dat$other)] <- 0
+
+# Remove original 'mstat' and 'race'
+dat <- dat[, -which(names(dat) %in% c("mstat","race"))]
+
+# Replace level == '8' with NA
+dat$angina15 <- factor(dat$angina15)
+levels(dat$angina15)[levels(dat$angina15)=="8"]<-NA
+dat$mi15 <- factor(dat$mi15)
+levels(dat$mi15)[levels(dat$mi15)=="8"]<-NA
+dat$stroke15 <- factor(dat$stroke15)
+levels(dat$stroke15)[levels(dat$stroke15)=="8"]<-NA
+dat$hf15 <- factor(dat$hf15)
+levels(dat$hf15)[levels(dat$hf15)=="8"]<-NA
+dat$cabg15 <- factor(dat$cabg15)
+levels(dat$cabg15)[levels(dat$cabg15)=="8"]<-NA
+dat$ca15 <- factor(dat$ca15)
+levels(dat$ca15)[levels(dat$ca15)=="8"]<-NA
+dat$othrcs15 <- factor(dat$othrcs15)
+levels(dat$othrcs15)[levels(dat$othrcs15)=="8"]<-NA
+dat$pacem15 <- factor(dat$pacem15)
+levels(dat$pacem15)[levels(dat$pacem15)=="8"]<-NA
+dat$sa15 <- factor(dat$sa15)
+levels(dat$sa15)[levels(dat$sa15)=="8"]<-NA
+dat$emphys15 <- factor(dat$emphys15)
+levels(dat$emphys15)[levels(dat$emphys15)=="8"]<-NA
+dat$crbron15 <- factor(dat$crbron15)
+levels(dat$crbron15)[levels(dat$crbron15)=="8"]<-NA
+dat$copd15 <- factor(dat$copd15)
+levels(dat$copd15)[levels(dat$copd15)=="8"]<-NA
+dat$asthma15 <- factor(dat$asthma15)
+levels(dat$asthma15)[levels(dat$asthma15)=="8"]<-NA
+dat$asth1215 <- factor(dat$asth1215)
+levels(dat$asth1215)[levels(dat$asth1215)=="8"]<-NA
+dat$cough315 <- factor(dat$cough315)
+levels(dat$cough315)[levels(dat$cough315)=="8"]<-NA
+dat$phlegm15 <- factor(dat$phlegm15)
+levels(dat$phlegm15)[levels(dat$phlegm15)=="8"]<-NA
+dat$runny15 <- factor(dat$runny15)
+levels(dat$runny15)[levels(dat$runny15)=="8"]<-NA
+dat$sinus15 <- factor(dat$sinus15)
+levels(dat$sinus15)[levels(dat$sinus15)=="8"]<-NA
+dat$nitro15 <- factor(dat$nitro15)
+levels(dat$nitro15)[levels(dat$nitro15)=="8"]<-NA
+
+# Number of missing values
+na_count <- map(dat[, !names(dat) %in% c('nsrrid','any_chd','any_cvd','date_to_event')], ~sum(is.na(.)))
+na_count <- data.frame(t(data.frame(na_count)))
+
+# Percentage of missing values
+na_pct <- na_count/nrow(dat)
+names(na_pct) <- 'na_pct'
+
+# Create list of 'binary variables under 40% NA rate', 'non-binary variables under 40% NA rate', and 'variables above 40% NA rate'
+# Imputation methods for variables: 0%-40% replace with mean or mode, 40%-95% replace with binary indicator
+na_pct$category = NA
+na_pct$category[na_pct$na_pct < 0.4] = 'impute'
+na_pct$category[na_pct$na_pct >= 0.4] = 'binary_indicator'
+over40 <- row.names(na_pct[na_pct[,'category'] == 'binary_indicator',])
+
+# Create level counts table
+levels_count <- map(dat[, !names(dat) %in% c('nsrrid','any_chd','any_cvd','date_to_event')], ~length(table(.)))
+levels_count <- data.frame(t(data.frame(levels_count)))
+names(levels_count) <- 'count'
+binary_below40 <- row.names(subset(levels_count, count == 2))
+binary_below40 <- binary_below40[! binary_below40 %in% c('prev_hx_mi', 'prev_hx_stroke')]
+other_below40 <- row.names(subset(levels_count, count > 2))
+other_below40 <- other_below40[! other_below40 %in% c('ankbp', 'armbp')]
+
+# Create get mode function
+getmode <- function(x) {
+   tbl <- sort(table(x))
+   if(var(tbl) == 0){NA
+     }else{as.numeric(names(tbl)[which(tbl==max(tbl))])}
+}
+# Replace missing values in each binary variable with their mode respectively
+for(i in binary_below40){
+  dat[is.na(dat[,i]), i] <- getmode(dat[,i])
+}
+# Replace missing values in each non-binary variable with their mean respectively
+for(i in other_below40){
+  dat[is.na(dat[,i]), i] <- mean(dat[,i], na.rm = TRUE)
+  }
+# Replace with binary indicators
+for(i in over40){
+  for(j in 1:nrow(dat)){
+    if(is.na(dat[j, i]) == T){
+      dat[j,i] <- 0
+    } else{
+      dat[j,i] <- 1
+    }
+  }
+}
+
+# Turn factor variables into numerical variables
+dat$angina15 <- as.numeric(as.character(dat$angina15))
+dat$mi15 <- as.numeric(as.character(dat$mi15))
+dat$stroke15 <- as.numeric(as.character(dat$stroke15))
+dat$hf15 <- as.numeric(as.character(dat$hf15))
+dat$cabg15 <- as.numeric(as.character(dat$cabg15))
+dat$ca15 <- as.numeric(as.character(dat$ca15))
+dat$othrcs15 <- as.numeric(as.character(dat$othrcs15))
+dat$pacem15 <- as.numeric(as.character(dat$pacem15))
+dat$sa15 <- as.numeric(as.character(dat$sa15))
+dat$emphys15 <- as.numeric(as.character(dat$emphys15))
+dat$crbron15 <- as.numeric(as.character(dat$crbron15))
+dat$copd15 <- as.numeric(as.character(dat$copd15))
+dat$asthma15 <- as.numeric(as.character(dat$asthma15))
+dat$asth1215 <- as.numeric(as.character(dat$asth1215))
+dat$cough315 <- as.numeric(as.character(dat$cough315))
+dat$phlegm15 <- as.numeric(as.character(dat$phlegm15))
+dat$runny15 <- as.numeric(as.character(dat$runny15))
+dat$sinus15 <- as.numeric(as.character(dat$sinus15))
+dat$nitro15 <- as.numeric(as.character(dat$nitro15))
+
+# Check correlation matrix
+correlations_before <- cor(dat[, !names(dat) %in% c('nsrrid','any_chd','any_cvd','date_to_event')])
+
+# Remove one variable from the pair with a correlation of 0.9 or above. This aims to solve co-linearity, prevent correlation matrix become singular
+suggest_removal <- findCorrelation(correlations_before, cutoff = 0.9, verbose = FALSE, names = TRUE, exact = ncol(correlations_before) < 100)
+dat <- dat[, -which(names(dat) %in% suggest_removal)]
+
+# Re-order columns
+dat <- dat %>% relocate(any_chd, .after = last_col())
+dat <- dat %>% relocate(any_cvd, .after = last_col())
+dat <- dat %>% relocate(date_to_event, .after = last_col())
+```
+
+## Logistic Lasso for all variables
+```{r}
+### ANY_CHD
+# Create a regression data frame for any_chd
+any_chd_reg <- dat[, 2:86]
+any_chd_reg$any_chd <- as.factor(any_chd_reg$any_chd)
+# Build a recipe, removes any column that has zero variance, normalizing all of the numeric columns that are the outcome
+fmla_lasso_chd <- as.formula(paste("any_chd ~", paste(colnames(any_chd_reg[, 1:84]), collapse = "+")))
+recipe_chd <- recipe(fmla_lasso_chd, data = any_chd_reg) %>%
+   step_normalize(all_numeric(), -any_chd)
+# Calculate the centering and the scaling
+prep_chd <- recipe_chd %>% 
+  prep()
+# Add recipe to workflow
+wf_chd <- workflow() %>%
+  add_recipe(recipe_chd)
+# Fit the Lasso
+lasso_chd <- logistic_reg(penalty = tune(), mixture = 1) %>% set_engine("glmnet")
+# Generate 20 lambda values evenly spaced in log space
+lambda_list_chd <- grid_regular(penalty(), levels = 20)
+# Randomly split data into 10 groups
+folds_chd <- vfold_cv(any_chd_reg, v = 10)
+# Tune model to find the best lambda
+wf_chd <- wf_chd %>% 
+  add_model(lasso_chd)
+rr_grid_chd <- tune_grid(wf_chd, resamples = folds_chd, grid = lambda_list_chd)
+# Select the most complex lasso model that is 
+best_chd <- rr_grid_chd %>% 
+  select_by_pct_loss(limit = 5, desc(penalty))
+final_rr_chd <- finalize_workflow(wf_chd, best_chd)
+# Extract the coefficients
+final_rr_chd <- final_rr_chd %>%
+  fit(any_chd_reg) %>%
+  tidy()
+final_rr_chd <- final_rr_chd[final_rr_chd$estimate != 0,]
+lasso_suggest_chd <- final_rr_chd$term[final_rr_chd$term != "(Intercept)"]
+# age_category_s1, htnderv_s1, mi15, syst120, angina15, ankbp, ca15, parrptdiab, ntg1, gender
+
+### ANY_CVD
+any_cvd_reg <- dat[, c(2:85,87)]
+any_cvd_reg$any_cvd <- as.factor(any_cvd_reg$any_cvd)
+
+fmla_lasso_cvd <- as.formula(paste("any_cvd ~", paste(colnames(any_cvd_reg[, 1:84]), collapse = "+")))
+
+recipe_cvd <- recipe(fmla_lasso_cvd, data = any_cvd_reg) %>%
+   step_normalize(all_numeric(), -any_cvd)
+
+prep_cvd <- recipe_cvd %>% 
+  prep()
+
+wf_cvd <- workflow() %>%
+  add_recipe(recipe_cvd)
+
+lasso_cvd <- logistic_reg(penalty = tune(), mixture = 1) %>% set_engine("glmnet")
+
+lambda_list_cvd <- grid_regular(penalty(), levels = 20)
+
+folds_cvd <- vfold_cv(any_cvd_reg, v = 10)
+
+wf_cvd <- wf_cvd %>% 
+  add_model(lasso_cvd)
+rr_grid_cvd <- tune_grid(wf_cvd, resamples = folds_cvd, grid = lambda_list_cvd)
+
+best_cvd <- rr_grid_cvd %>% 
+  select_by_pct_loss(limit = 5, desc(penalty))
+final_rr_cvd <- finalize_workflow(wf_cvd, best_cvd)
+
+final_rr_cvd <- final_rr_cvd %>%
+  fit(any_cvd_reg) %>%
+  tidy()
+final_rr_cvd <- final_rr_cvd[final_rr_cvd$estimate != 0,]
+lasso_suggest_cvd <- final_rr_cvd$term[final_rr_cvd$term != "(Intercept)"]
+# age_category_s1, ankbp, htnderv_s1, syst120, angina15, mi15, parrptdiab, nitro15, dig1, loop1, warf1, othrcs15, cabg15, systbp, gender 
+```
+
+## LIMMA(Emperical Bayes) for all variables
+```{r}
+design_chd_all <- model.matrix(~ any_chd, data = dat[,2:86])
+exp_all <- t(as.matrix(dat[,2:85]))
+fit_chd_all <- lmFit(exp_all, design_chd_all)
+fit_chd_all <- eBayes(fit_chd_all)
+tT_chd_all <- topTable(fit_chd_all, number = 84, adjust.method = 'BH')
+tT_chd_all <- subset(tT_chd_all, select=c("P.Value","adj.P.Val", "B"))
+chd_sig_all <- tT_chd_all[tT_chd_all$adj.P.Val < 0.05,]
+# age_category_s1, mi15, htnderv_s1, ankbp, angina15, gender, syst120, ca15, srhype, ntg1, nitro15, systbp, cabg15, parrptdiab, loop1, ccbsr1, asa1, dig1, estrgn1, beta1, prev_hx_stroke, hdl, lipid1, diuret1, premar1, ace1, cgpkyr, ohga1, othrcs15, hf15, ccbir1, diasbp, warf1, progst1, alpha1, educat, other, ethnicity, insuln1, stroke15, trig, dias120, vaso1, emphys15, cough315, phlegm15, aai, alcoh, benzod1, black, widowed, niac1, copd15, anar1a1, hctzk1, ntca1, pacem15, pvdl1
+
+design_cvd_all <- model.matrix(~ any_cvd, data = dat[,c(2:85,87)])
+fit_cvd_all <- lmFit(exp_all, design_cvd_all)
+fit_cvd_all <- eBayes(fit_cvd_all)
+tT_cvd_all <- topTable(fit_cvd_all, number = 84, adjust.method = 'BH')
+tT_cvd_all <- subset(tT_cvd_all, select=c("P.Value","adj.P.Val", "B"))
+cvd_sig_all <- tT_cvd_all[tT_cvd_all$adj.P.Val < 0.05,]
+# age_category_s1, ankbp, htnderv_s1, syst120, srhype, mi15, angina15, nitro15, dig1, systbp, loop1, cabg15, parrptdiab, ntg1, diuret1, ccbsr1, ca15, prev_hx_stroke, beta1, gender, warf1, asa1, hf15, othrcs15, stroke15, educat, diasbp, estrgn1, ccbir1, ohga1, ace1, cgpkyr, widowed, pacem15, lipid1, other, premar1, dias120, ethnicity, black, alpha1, progst1, hdl, aai, insuln1, emphys15, phlegm15, anar1a1, vaso1, cough315, copd15, benzod1, hctz1, pdei1, hctzk1, married, trig, nsaid1, runny15
+```
+
+## Cox proportional hazards for all variables
+```{r}
+# Create formula, variables suggested by Lasso
+fmla_chd <- as.formula(paste("Surv(date_to_event, any_chd) ~", paste(lasso_suggest_chd, collapse= "+")))
+fmla_cvd <- as.formula(paste("Surv(date_to_event, any_cvd) ~", paste(lasso_suggest_cvd, collapse= "+")))
+
+res.cox_chd_all <- coxph(fmla_chd, data = dat)
+summary(res.cox_chd_all)
+ggsurvplot(survfit(res.cox_chd_all), data = dat, palette = "#2E9FDF", 
+       ggtheme = theme_minimal(), legend = "none", xlab = "Days from index date", ylab = "No chd probability")
+# Increase risk: parrptdiab, ankbp, syst120, angina15, mi15, ca15, ntg1, htnderv_s1, age_category_s1
+# Decrease risk: gender 
+
+res.cox_cvd_all <- coxph(fmla_cvd, data = dat)
+summary(res.cox_cvd_all)
+ggsurvplot(survfit(res.cox_cvd_all), data = dat, palette = "#2E9FDF", 
+       ggtheme = theme_minimal(), legend = "none", xlab = "Days from index date", ylab = "No cvd probability")
+# Increase risk: parrptdiab, systbp, ankbp, syst120, angina15, mi15, othrcs15, nitro15, warf1, loop1, dig1, htnderv_s1, age_category_s1
+# Decrease risk: gender
+```
+
+# Dimension reduction analysis
+```{r}
+### Factorial analysis
+# Round correlation matrix to 2 decimal places in order to solve singularity
+cor_dat <- round(cor(dat[, !names(dat) %in% c('nsrrid','any_chd','any_cvd','date_to_event')]), 2)
+corrplot(cor_dat)
+# Parallel Analysis
+# Extract important eigenvalues through comparison with a random matrix with same dimension. If the eigenvalue from our data is greater than the average eigenvalues from a random matrix, we keep this eigenvalue and mark it as significant. Note, eigenvalues correspond to PCs.
+fa.parallel(cor_dat, n.obs = 5042, fa = "both", n.iter = 100, main = "Parallel Analysis Scree Plot")
+# Parallel analysis suggests that the number of factors =  27  and the number of components =  23 
+
+# Extract factors
+# Oblique rotation allows factor correlation
+Factor.Result <- fa(cor_dat, nfactors = 27, rotate = "promax", fm = "pa")
+Factor.Result
+# PA is component loading
+
+# Create a table for variables
+# For each row, includes the name of the variable, its optimal factor selection, the corresponding value in that factor and the corresponding absolute value
+PA_dat <- as.data.frame(colnames(dat[, !names(dat) %in% c('nsrrid','any_chd','any_cvd','date_to_event')]))
+PA_dat$opt_factor <- NA
+PA_dat$Values <- NA
+names(PA_dat) <- c('Variables', 'Opt_factor', 'Values')
+
+for(i in 1:nrow(PA_dat)){
+  a <- max(abs(Factor.Result[["loadings"]][i,]))
+  b <- which(abs(Factor.Result[["loadings"]][i,]) == a)
+  PA_dat[i,2] <- b
+  PA_dat[i,3] <- Factor.Result[["loadings"]][i,][b]
+}
+PA_dat$abs_values <- abs(PA_dat$Values)
+
+# Check number of components in each factor
+table(PA_dat$Opt_factor)
+
+# Create a table for factors and their components
+PA_Comp <- data.frame(PA = paste('PA',1:27, sep = ''))
+PA_Comp$Components <- NA
+for(i in 1:27){
+  PA_Comp[i,2] <- toString(paste(PA_dat[PA_dat$Opt_factor == i,]$Variables, sep = ','))
+}
+
+# Compute score matrix (Score matrix = X matrix * Loadings matrix)
+loadings <- as.matrix(Factor.Result$loadings)
+score_matrix <- as.matrix(dat[, !names(dat) %in% c('nsrrid','any_chd','any_cvd','date_to_event')])%*%loadings
+score_matrix <- as.data.frame(score_matrix)
+
+# Join two datasets, combine 27 PAs with 2 outcomes
+Reg_dat <- cbind(score_matrix, oc)
+```
+
+## Logistic Lasso for factors
+```{r}
+### ANY_CHD
+any_chd_reg_PA <- Reg_dat[, 1:28]
+any_chd_reg_PA$any_chd <- as.factor(any_chd_reg_PA$any_chd)
+
+fmla_lasso_chd_PA <- as.formula(paste("any_chd ~", paste(colnames(any_chd_reg_PA[, 1:27]), collapse = "+")))
+recipe_chd_PA <- recipe(fmla_lasso_chd_PA, data = any_chd_reg_PA) %>%
+   step_normalize(all_numeric(), -any_chd)
+
+prep_chd_PA <- recipe_chd_PA %>% 
+  prep()
+
+wf_chd_PA <- workflow() %>%
+  add_recipe(recipe_chd_PA)
+
+lasso_chd_PA <- logistic_reg(penalty = tune(), mixture = 1) %>% set_engine("glmnet")
+
+lambda_list_chd_PA <- grid_regular(penalty(), levels = 20)
+
+folds_chd_PA <- vfold_cv(any_chd_reg_PA, v = 10)
+
+wf_chd_PA <- wf_chd_PA %>% 
+  add_model(lasso_chd_PA)
+rr_grid_chd_PA <- tune_grid(wf_chd_PA, resamples = folds_chd_PA, grid = lambda_list_chd_PA)
+
+best_chd_PA <- rr_grid_chd_PA %>% 
+  select_by_pct_loss(limit = 5, desc(penalty))
+final_rr_chd_PA <- finalize_workflow(wf_chd_PA, best_chd_PA)
+
+final_rr_chd_PA <- final_rr_chd_PA %>%
+  fit(any_chd_reg_PA) %>%
+  tidy()
+final_rr_chd_PA <- final_rr_chd_PA[final_rr_chd_PA$estimate != 0,]
+lasso_suggest_chd_PA <- final_rr_chd_PA$term[final_rr_chd_PA$term != "(Intercept)"]
+# "PA6"  "PA2"  "PA19" "PA3"  "PA1"  "PA9"  "PA13" "PA10" "PA25" "PA18" "PA26"
+
+### ANY_CVD
+any_cvd_reg_PA <- Reg_dat[, c(1:27,29)]
+any_cvd_reg_PA$any_cvd <- as.factor(any_cvd_reg_PA$any_cvd)
+
+fmla_lasso_cvd_PA <- as.formula(paste("any_cvd ~", paste(colnames(any_cvd_reg_PA[, 1:27]), collapse = "+")))
+
+recipe_cvd_PA <- recipe(fmla_lasso_cvd_PA, data = any_cvd_reg_PA) %>%
+   step_normalize(all_numeric(), -any_cvd)
+
+prep_cvd_PA <- recipe_cvd_PA %>% 
+  prep()
+
+wf_cvd_PA <- workflow() %>%
+  add_recipe(recipe_cvd_PA)
+
+lasso_cvd_PA <- logistic_reg(penalty = tune(), mixture = 1) %>% set_engine("glmnet")
+
+lambda_list_cvd_PA <- grid_regular(penalty(), levels = 20)
+
+folds_cvd_PA <- vfold_cv(any_cvd_reg_PA, v = 10)
+
+wf_cvd_PA <- wf_cvd_PA %>% 
+  add_model(lasso_cvd_PA)
+rr_grid_cvd_PA <- tune_grid(wf_cvd_PA, resamples = folds_cvd_PA, grid = lambda_list_cvd_PA)
+
+best_cvd_PA <- rr_grid_cvd_PA %>% 
+  select_by_pct_loss(limit = 5, desc(penalty))
+final_rr_cvd_PA <- finalize_workflow(wf_cvd_PA, best_cvd_PA)
+
+final_rr_cvd_PA <- final_rr_cvd_PA %>%
+  fit(any_cvd_reg_PA) %>%
+  tidy()
+final_rr_cvd_PA <- final_rr_cvd_PA[final_rr_cvd_PA$estimate != 0,]
+lasso_suggest_cvd_PA <- final_rr_cvd_PA$term[final_rr_cvd_PA$term != "(Intercept)"]
+# "PA6"  "PA2"  "PA19" "PA3"  "PA1"  "PA10" "PA22" "PA25" "PA23" "PA18" "PA27" "PA26"
+```
+
+## LIMMA(Emperical Bayes) for factors
+```{r}
+design_chd <- model.matrix(~ any_chd ,data = Reg_dat[,-c(29,30)])
+exp <- t(as.matrix(Reg_dat[,-c(28,29,30)]))
+# lmFit fits a linear model using weighted least squares
+# Given a linear model fit from lmFit, compute moderated t-statistics, moderated F-statistic, and log-odds of differential expression by empirical Bayes moderation of the standard errors towards a global value.
+fit_chd <- lmFit(exp, design_chd)
+# Extract a table of the top-ranked components from a linear model fit.
+fit_chd <- eBayes(fit_chd)
+# Multiple testing correction
+# Adjust p-value with Benjamini & Hochberg Correction, most appropriate, more powerful
+# The adjusted p-values from this method are bounds on the FDR rather than p-values in the usual sense. Because they relate to FDRs rather than rejection probabilities, they are sometimes called q-values.
+tT_chd <- topTable(fit_chd, number = 27, adjust.method = 'BH')
+# "B": log-odds of differential expression
+tT_chd <- subset(tT_chd, select=c("P.Value","adj.P.Val", "B"))
+# Compare adjusted p value to 0.05 (We want FDR to be no more than 0.05).
+chd_sig <- tT_chd[tT_chd$adj.P.Val < 0.05,]
+# PA19, PA5, PA9, PA10, PA11, PA27, PA17, PA24, PA18, PA26, PA25, PA6, PA23, PA8, PA3, PA15, PA2, PA16, PA14
+
+design_cvd <- model.matrix(~ any_cvd, data = Reg_dat[,-c(28,30)])
+fit_cvd <- lmFit(exp, design_cvd)
+fit_cvd <- eBayes(fit_cvd)
+tT_cvd <- topTable(fit_cvd, number = 27, adjust.method = 'BH')
+tT_cvd <- subset(tT_cvd, select=c("P.Value","adj.P.Val", "B"))
+cvd_sig <- tT_cvd[tT_cvd$adj.P.Val < 0.05,]
+# PA19, PA5, PA27, PA9, PA11, PA10, PA3, PA24, PA23, PA6, PA25, PA17, PA18, PA2, PA26, PA8, PA15, PA16
+```
+
+## Cox proportional hazards for factors
+```{r}
+# Create formula, variables suggested by Lasso
+fmla_chd_PA <- as.formula(paste("Surv(date_to_event, any_chd) ~", paste(lasso_suggest_chd_PA, collapse= "+")))
+fmla_cvd_PA <- as.formula(paste("Surv(date_to_event, any_cvd) ~", paste(lasso_suggest_cvd_PA, collapse= "+")))
+
+res.cox_chd_PA <- coxph(fmla_chd_PA, data = Reg_dat)
+# exp(coef) is Hazard Ratio(HR)
+# Z: Wald statistics
+# Likelihood ratio test/Wald test/Score (logrank) test all significant means reject omnibus null hypothesis（H0: beta = 0 for all)
+summary(res.cox_chd_PA)
+
+# Plot survival plot
+ggsurvplot(survfit(res.cox_chd_PA), data = Reg_dat, palette = "#2E9FDF", 
+       ggtheme = theme_minimal(), legend = "none", xlab = "Days from index date", ylab = "No chd probability")
+# Increase risk: PA6, PA19, PA1, PA10, PA25
+# Decrease risk: PA2, PA26
+
+res.cox_cvd_PA <- coxph(fmla_cvd_PA, data = Reg_dat)
+summary(res.cox_cvd_PA)
+
+ggsurvplot(survfit(res.cox_cvd_PA), data = Reg_dat, palette = "#2E9FDF", 
+       ggtheme = theme_minimal(), legend = "none", xlab = "Days from index date", ylab = "No cvd probability")
+# Increase risk: PA6, PA19, PA3, PA1, PA10, PA22, PA25, PA23, PA18
+# Decrease risk: PA2, PA27, PA26
+```
+
