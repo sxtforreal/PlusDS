@@ -5,9 +5,8 @@ Identified the drivers of the risk of coronary heart disease and cardiovascular 
 
 ## Details
 1. Conducted data pre-processing including transformations, imputation, deduplication, and construction of survival labels.
-2. Quantified univariate associations between features and endpoints through t-test analyses.
-3. Performed factor analysis to uncover interpretable latent structures of the data.
-4. Trained the Lasso-Cox Proportional Hazards model and XGBoost-Accelerated Failure Time model to measure the contributions of factors towards increasing or decreasing risk and to model complex feature interactions.
+2. Performed Exploratory Data Analyses using paired t-test and factor analysis to quantify univariate associations and identify underlying structures of the data.
+3. Trained the Lasso-Cox Proportional Hazards model and XGBoost-Accelerated Failure Time model to measure the contributions of factors towards increasing or decreasing risk and to model complex feature interactions.
 
 ## Software
 R - 4.2.2
